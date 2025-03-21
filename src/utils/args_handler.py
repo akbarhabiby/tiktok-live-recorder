@@ -1,5 +1,6 @@
 import argparse
 import re
+import os
 
 from utils.custom_exceptions import ArgsParseError
 from utils.enums import Mode, Regex
@@ -82,6 +83,13 @@ def parse_args():
 
 def validate_and_parse_args():
     args = parse_args()
+
+    args.output = os.getenv("TLR_OUTPUT") or args.output
+    args.url = os.getenv("TLR_URL") or args.url
+    args.user = os.getenv("TLR_USERNAME") or args.user
+    args.room_id = os.getenv("TLR_ROOM_ID") or args.room_id
+    args.duration = int(os.getenv("TLR_DURATION", 0)) or args.duration
+    args.mode = os.getenv("TLR_MODE") or args.mode
 
     if not args.user and not args.room_id and not args.url:
         raise ArgsParseError("Missing URL, username, or room ID. Please provide one of these parameters.")

@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import signal
 from http.client import HTTPException
 
 from requests import RequestException
@@ -40,6 +41,7 @@ class TikTok:
 
         # Recording Settings
         self.duration = duration
+        self.stop_recording = False
 
         # Output & Results
         self.output = output
@@ -83,11 +85,28 @@ class TikTok:
         and if not, waits for the specified timeout before rechecking.
         If the user is live, it starts recording.
         """
+
+        # Register signal handlers for CTRL+C and Docker stop
+        signal.signal(signal.SIGINT, self.handle_signal)  # CTRL+C
+        signal.signal(signal.SIGTERM, self.handle_signal)  # Docker Stop
+
         if self.mode == Mode.MANUAL:
             self.manual_mode()
 
         if self.mode == Mode.AUTOMATIC:
             self.automatic_mode()
+
+    def handle_signal(self, signum, frame):
+        """Handle signals (CTRL+C, Docker Stop) to stop recording properly."""
+        logger.info("Received shutdown signal. Stopping recording...")
+        self.stop_recording = True
+
+    def sleep_with_exit(self, duration):
+        """Custom sleep function that checks for stop signals"""
+        for _ in range(duration):
+            if self.stop_recording:
+                break # Exit if signal is received
+            time.sleep(1)
 
     def manual_mode(self):
         if not self.is_user_in_live():
@@ -98,6 +117,9 @@ class TikTok:
     def automatic_mode(self):
         while True:
             try:
+                if self.stop_recording:
+                    break # Exit if signal is received
+
                 self.room_id = self.get_room_id_from_user()
 
                 if self.room_id == '' or not self.is_user_in_live():
@@ -108,11 +130,11 @@ class TikTok:
             except UserLiveException as ex:
                 logger.info(ex)
                 logger.info(f"Waiting {TimeOut.AUTOMATIC_MODE} minutes before recheck\n")
-                time.sleep(TimeOut.AUTOMATIC_MODE * TimeOut.ONE_MINUTE)
+                self.sleep_with_exit(TimeOut.AUTOMATIC_MODE * TimeOut.ONE_MINUTE)
 
             except ConnectionError:
                 logger.error(Error.CONNECTION_CLOSED_AUTOMATIC)
-                time.sleep(TimeOut.CONNECTION_CLOSED * TimeOut.ONE_MINUTE)
+                self.sleep_with_exit(TimeOut.CONNECTION_CLOSED * TimeOut.ONE_MINUTE)
 
             except Exception as ex:
                 logger.error(f"Unexpected error: {ex}\n")
@@ -121,6 +143,7 @@ class TikTok:
         """
         Start recording live
         """
+
         live_url = self.get_live_url()
         if live_url is None or live_url == '':
             raise LiveNotFound(TikTokError.RETRIEVE_LIVE_URL)
@@ -144,18 +167,20 @@ class TikTok:
         BUFFER_SIZE = 3 * (1024 * 1024)  # 3 MB buffer
         buffer = bytearray()
 
-        logger.info("[PRESS CTRL + C ONCE TO STOP]")
+        logger.info("[PRESS CTRL + C ONCE TO STOP or use 'docker compose down']")
         with open(output, "wb") as out_file:
-            stop_recording = False
-            while not stop_recording:
+            while not self.stop_recording:
                 try:
                     if not self.is_user_in_live():
                         logger.info("User is no longer live. Stopping recording.")
                         break
 
-                    response = self.httpclient.get(live_url, stream=True)
+                    response = self.httpclient.get(live_url, stream=True) # Requests cannot release the connection back to the pool unless you consume all the data or call Response.close.
                     start_time = time.time()
                     for chunk in response.iter_content(chunk_size=None):
+                        if self.stop_recording:
+                            break # Exit if signal is received
+
                         if not chunk or len(chunk) == 0:
                             continue
 
@@ -166,24 +191,20 @@ class TikTok:
 
                         elapsed_time = time.time() - start_time
                         if self.duration is not None and elapsed_time >= self.duration:
-                            stop_recording = True
+                            self.stop_recording = True
                             break
 
                 except ConnectionError:
                     if self.mode == Mode.AUTOMATIC:
                         logger.error(Error.CONNECTION_CLOSED_AUTOMATIC)
-                        time.sleep(TimeOut.CONNECTION_CLOSED * TimeOut.ONE_MINUTE)
+                        self.sleep_with_exit(TimeOut.CONNECTION_CLOSED * TimeOut.ONE_MINUTE)
 
                 except (RequestException, HTTPException):
-                    time.sleep(2)
-
-                except KeyboardInterrupt:
-                    logger.info("Recording stopped by user.")
-                    stop_recording = True
+                    self.sleep_with_exit(2)
 
                 except Exception as ex:
                     logger.error(f"Unexpected error: {ex}\n")
-                    stop_recording = True
+                    self.stop_recording = True
 
                 finally:
                     if buffer:
